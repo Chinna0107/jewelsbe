@@ -59,7 +59,7 @@ router.get('/products', async (req, res) => {
 
 // POST /api/general/orders (Checkout)
 router.post('/orders', async (req, res) => {
-  const { items, address, total, coupon_code } = req.body;
+  const { items, address, total, coupon_code, payment_method, advance_paid } = req.body;
   
   if (!items || items.length === 0) {
     return res.status(400).json({ error: 'Cart is empty' });
@@ -69,11 +69,13 @@ router.post('/orders', async (req, res) => {
     const orderNumber = `ORD-${Date.now()}`;
     const itemsJson = JSON.stringify(items);
     const addressJson = JSON.stringify(address);
+    const pMethod = payment_method || 'prepaid';
+    const advancePaid = pMethod === 'cod' ? 100 : (parseFloat(total) || 0);
     
     const result = await pool.query(
-      `INSERT INTO orders (order_number, total, items, address, status)
-       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-      [orderNumber, total, itemsJson, addressJson, 'pending']
+      `INSERT INTO orders (order_number, total, items, address, status, payment_method, advance_paid)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      [orderNumber, total, itemsJson, addressJson, 'pending', pMethod, advancePaid]
     );
     
     // Send email to admin
