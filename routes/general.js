@@ -150,4 +150,27 @@ router.get('/banners', async (req, res) => {
   }
 });
 
+// POST /api/general/validate-coupon
+router.post('/validate-coupon', async (req, res) => {
+  const { code, cartValue } = req.body;
+  try {
+    const result = await pool.query('SELECT * FROM coupons WHERE code=$1 AND is_active=true', [code]);
+    const coupon = result.rows[0];
+    
+    if (!coupon) return res.status(404).json({ error: 'Invalid or inactive coupon code' });
+    
+    if (coupon.expires_at && new Date() > new Date(coupon.expires_at)) {
+      return res.status(400).json({ error: 'Coupon has expired' });
+    }
+    
+    if (cartValue < coupon.min_order_value) {
+      return res.status(400).json({ error: `Minimum order value for this coupon is ₹${coupon.min_order_value}` });
+    }
+    
+    res.json({ success: true, coupon });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 module.exports = router;
