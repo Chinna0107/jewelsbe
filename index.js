@@ -7,8 +7,8 @@ const PORT = process.env.PORT || 5000;
 
 const allowedOrigins = [
   'http://localhost:5173',
-  'https://traditional-xi.vercel.app',
-  'https://www.mokshamandir.in',
+  'https://jewels-teal.vercel.app',
+  // 'https://www.mokshamandir.in',
   process.env.FRONTEND_URL
 ];
 
