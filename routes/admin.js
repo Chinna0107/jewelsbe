@@ -462,4 +462,37 @@ router.delete('/shipping-pincodes/:id', authMiddleware, adminOnly, async (req, r
     res.status(500).json({ error: 'Server error' });
   }
 });
+
+// GET /api/admin/settings/announcement
+router.get('/settings/announcement', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT value FROM settings WHERE key = $1', ['announcement_bar']);
+    if (result.rows.length > 0) {
+      res.json({ announcement: result.rows[0].value });
+    } else {
+      res.json({ announcement: { text: '', is_active: false, link: '' } });
+    }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/admin/settings/announcement
+router.post('/settings/announcement', authMiddleware, adminOnly, async (req, res) => {
+  const { text, is_active, link } = req.body;
+  try {
+    const value = JSON.stringify({ text, is_active, link });
+    await pool.query(
+      `INSERT INTO settings (key, value) VALUES ('announcement_bar', $1)
+       ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()`,
+      [value]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 module.exports = router;

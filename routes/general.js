@@ -201,5 +201,18 @@ router.get('/shipping', async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 });
+// GET /api/general/settings/announcement
+router.get('/settings/announcement', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT value FROM settings WHERE key = $1', ['announcement_bar']);
+    if (result.rows.length > 0) {
+      res.json({ announcement: result.rows[0].value });
+    } else {
+      res.json({ announcement: { text: '', is_active: false, link: '' } });
+    }
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
 
 module.exports = router;
