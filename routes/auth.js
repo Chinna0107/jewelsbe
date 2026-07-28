@@ -243,7 +243,7 @@ router.post('/address', authMiddleware, async (req, res) => {
 
 // POST /api/auth/orders
 router.post('/orders', authMiddleware, async (req, res) => {
-  const { items, address, total, coupon_code, payment_method, advance_paid } = req.body;
+  const { items, address, total, coupon_code, payment_method, advance_paid, order_type } = req.body;
 
   if (!items || items.length === 0) {
     return res.status(400).json({ error: 'Cart is empty' });
@@ -252,15 +252,59 @@ router.post('/orders', authMiddleware, async (req, res) => {
   try {
     const orderNumber = `ORD-${Date.now()}`;
     const itemsJson = JSON.stringify(items);
-    const addressJson = JSON.stringify(address);
+    const addressJson = JSON.stringify(address || {});
     const pMethod = payment_method || 'prepaid';
     const advancePaid = pMethod === 'cod' ? 100 : (parseFloat(total) || 0);
+    const oType = order_type === 'pickup' ? 'pickup' : 'shipping';
 
     const result = await pool.query(
-      `INSERT INTO orders (user_id, order_number, total, items, address, status, payment_method, advance_paid)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-      [req.user.id, orderNumber, total, itemsJson, addressJson, 'pending', pMethod, advancePaid]
+      `INSERT INTO orders (user_id, order_number, total, items, address, status, payment_method, advance_paid, order_type)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+      [req.user.id, orderNumber, total, itemsJson, addressJson, 'pending', pMethod, advancePaid, oType]
     );
+
+    // Reduce Stock Logic
+    for (const item of items) {
+      if (item.product && item.product.id) {
+        const prodRes = await pool.query('SELECT variants FROM products WHERE id=$1', [item.product.id]);
+        let variants = [];
+        try { variants = typeof prodRes.rows[0]?.variants === 'string' ? JSON.parse(prodRes.rows[0].variants) : (prodRes.rows[0]?.variants || []); } catch(e){}
+
+        let updated = false;
+        const itemColor = (item.variant?.color || item.product?.color || '').toString().toLowerCase().trim();
+        const itemSize = (item.variant?.size || '').toString().trim();
+
+        for (let v of variants) {
+          const vColor = (v.color || '').toString().toLowerCase().trim();
+          const colorMatch = !itemColor || !vColor || vColor === itemColor;
+          if (colorMatch) {
+            for (let s of (v.sizes || [])) {
+              const sSize = (s.size || '').toString().trim();
+              if (!itemSize || sSize === itemSize) {
+                s.stock = Math.max(0, parseInt(s.stock || 0) - parseInt(item.qty || 1));
+                updated = true;
+              }
+            }
+          }
+        }
+
+        if (updated) {
+          await pool.query('UPDATE products SET variants=$1 WHERE id=$2', [JSON.stringify(variants), item.product.id]);
+        }
+      }
+    }
+
+    // Mark coupon as used for one_time coupons
+    if (coupon_code && req.user?.id) {
+      const couponRes = await pool.query('SELECT * FROM coupons WHERE code=$1', [coupon_code]);
+      const coupon = couponRes.rows[0];
+      if (coupon && coupon.usage_type === 'one_time') {
+        await pool.query(
+          'UPDATE coupons SET used_by = array_append(COALESCE(used_by, \'{}\'), $1::int) WHERE id=$2',
+          [req.user.id, coupon.id]
+        );
+      }
+    }
 
     // Send email to admin
     sendOrderEmailToAdmin(orderNumber, total);
@@ -318,6 +362,7 @@ router.get('/my-coupons', authMiddleware, async (req, res) => {
        WHERE is_active = true 
        AND (user_id IS NULL OR user_id = $1) 
        AND (expires_at IS NULL OR expires_at > NOW())
+       AND (usage_type != 'one_time' OR NOT ($1::int = ANY(COALESCE(used_by, '{}'))))
        ORDER BY user_id NULLS LAST, created_at DESC`,
       [req.user.id]
     );

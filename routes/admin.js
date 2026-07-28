@@ -152,26 +152,30 @@ router.get('/products', authMiddleware, adminOnly, async (req, res) => {
 });
 
 router.post('/products', authMiddleware, adminOnly, async (req, res) => {
-    const { name, description, stock, sizes, image_url, images, color, category, model, is_active, is_bestseller, is_trending, is_offer, is_festive } = req.body;
+    const { name, description, stock, sizes, image_url, images, color, category, model, is_active, is_bestseller, is_trending, is_offer, is_festive, product_code, variants, reviews, details } = req.body;
     
-    // Validate sizes
-    if (!sizes || !Array.isArray(sizes) || sizes.length === 0) {
-      return res.status(400).json({ error: 'At least one size with price is required.' });
+    // Validate sizes/variants
+    if ((!sizes || !Array.isArray(sizes) || sizes.length === 0) && (!variants || !Array.isArray(variants) || variants.length === 0)) {
+      return res.status(400).json({ error: 'At least one size or variant with price is required.' });
     }
 
     try {
     const result = await pool.query(
       `INSERT INTO products 
-       (name, description, stock, sizes, image_url, images, color, category, model, is_active, is_bestseller, is_trending, is_offer, is_festive) 
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING *`,
+       (name, description, stock, sizes, image_url, images, color, category, model, is_active, is_bestseller, is_trending, is_offer, is_festive, product_code, variants, reviews, details) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18) RETURNING *`,
       [
-        name, description, stock, JSON.stringify(sizes), image_url, 
+        name, description, stock, JSON.stringify(sizes || []), image_url, 
         JSON.stringify(images || []), color, category, model, 
         is_active ?? true,
         is_bestseller ?? false,
         is_trending ?? false,
         is_offer ?? false,
-        is_festive ?? false
+        is_festive ?? false,
+        product_code || null,
+        JSON.stringify(variants || []),
+        JSON.stringify(reviews || []),
+        JSON.stringify(details || [])
       ]
     );
     res.json({ product: result.rows[0] });
@@ -181,13 +185,16 @@ router.post('/products', authMiddleware, adminOnly, async (req, res) => {
 });
 
 router.put('/products/:id', authMiddleware, adminOnly, async (req, res) => {
-  const { name, description, sizes, stock, image_url, images, color, category, model, is_active, is_bestseller, is_trending, is_offer, is_festive } = req.body;
+  const { name, description, sizes, stock, image_url, images, color, category, model, is_active, is_bestseller, is_trending, is_offer, is_festive, product_code, variants, reviews, details } = req.body;
   try {
     const sizesJson = Array.isArray(sizes) ? JSON.stringify(sizes) : '[]';
     const imagesJson = Array.isArray(images) ? JSON.stringify(images) : (image_url ? JSON.stringify([image_url]) : '[]');
+    const variantsJson = Array.isArray(variants) ? JSON.stringify(variants) : '[]';
+    const reviewsJson = Array.isArray(reviews) ? JSON.stringify(reviews) : '[]';
+    const detailsJson = Array.isArray(details) ? JSON.stringify(details) : '[]';
     const result = await pool.query(
-      'UPDATE products SET name=$1, description=$2, sizes=$3, stock=$4, image_url=$5, images=$6, color=$7, category=$8, model=$9, is_active=$10, is_bestseller=$11, is_trending=$12, is_offer=$13, is_festive=$14 WHERE id=$15 RETURNING *',
-      [name, description, sizesJson, stock, image_url, imagesJson, color, category, model || null, is_active, is_bestseller, is_trending, is_offer, is_festive, req.params.id]
+      'UPDATE products SET name=$1, description=$2, sizes=$3, stock=$4, image_url=$5, images=$6, color=$7, category=$8, model=$9, is_active=$10, is_bestseller=$11, is_trending=$12, is_offer=$13, is_festive=$14, product_code=$15, variants=$16, reviews=$17, details=$18 WHERE id=$19 RETURNING *',
+      [name, description, sizesJson, stock, image_url, imagesJson, color, category, model || null, is_active, is_bestseller, is_trending, is_offer, is_festive, product_code || null, variantsJson, reviewsJson, detailsJson, req.params.id]
     );
     res.json({ product: result.rows[0] });
   } catch (err) {
@@ -247,13 +254,13 @@ router.get('/coupons', authMiddleware, adminOnly, async (req, res) => {
 });
 
 router.post('/coupons', authMiddleware, adminOnly, async (req, res) => {
-  const { code, discount_type, discount_value, min_order_value, is_active, expires_at, user_id } = req.body;
+  const { code, discount_type, discount_value, min_order_value, is_active, expires_at, user_id, usage_type, min_type, min_qty } = req.body;
   try {
-    const validExpiresAt = expires_at === "" ? null : expires_at;
+    const validExpiresAt = expires_at === '' ? null : expires_at;
     const targetUserId = user_id && user_id !== 'all' ? user_id : null;
     const result = await pool.query(
-      'INSERT INTO coupons (code, discount_type, discount_value, min_order_value, is_active, expires_at, user_id) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *',
-      [code, discount_type || 'percentage', discount_value || 0, min_order_value || 0, is_active ?? true, validExpiresAt, targetUserId]
+      'INSERT INTO coupons (code, discount_type, discount_value, min_order_value, is_active, expires_at, user_id, usage_type, min_type, min_qty) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *',
+      [code, discount_type || 'percentage', discount_value || 0, min_order_value || 0, is_active ?? true, validExpiresAt, targetUserId, usage_type || 'multiple', min_type || 'amount', min_qty || 0]
     );
     res.json({ coupon: result.rows[0] });
   } catch (err) {
@@ -262,13 +269,13 @@ router.post('/coupons', authMiddleware, adminOnly, async (req, res) => {
 });
 
 router.put('/coupons/:id', authMiddleware, adminOnly, async (req, res) => {
-  const { code, discount_type, discount_value, min_order_value, is_active, expires_at, user_id } = req.body;
+  const { code, discount_type, discount_value, min_order_value, is_active, expires_at, user_id, usage_type, min_type, min_qty } = req.body;
   try {
-    const validExpiresAt = expires_at === "" ? null : expires_at;
+    const validExpiresAt = expires_at === '' ? null : expires_at;
     const targetUserId = user_id && user_id !== 'all' ? user_id : null;
     const result = await pool.query(
-      'UPDATE coupons SET code=$1, discount_type=$2, discount_value=$3, min_order_value=$4, is_active=$5, expires_at=$6, user_id=$7 WHERE id=$8 RETURNING *',
-      [code, discount_type || 'percentage', discount_value || 0, min_order_value || 0, is_active ?? true, validExpiresAt, targetUserId, req.params.id]
+      'UPDATE coupons SET code=$1, discount_type=$2, discount_value=$3, min_order_value=$4, is_active=$5, expires_at=$6, user_id=$7, usage_type=$8, min_type=$9, min_qty=$10 WHERE id=$11 RETURNING *',
+      [code, discount_type || 'percentage', discount_value || 0, min_order_value || 0, is_active ?? true, validExpiresAt, targetUserId, usage_type || 'multiple', min_type || 'amount', min_qty || 0, req.params.id]
     );
     res.json({ coupon: result.rows[0] });
   } catch (err) {
@@ -405,7 +412,7 @@ router.post('/offers/:id/apply', authMiddleware, adminOnly, async (req, res) => 
 router.get('/settings/shipping', authMiddleware, adminOnly, async (req, res) => {
   try {
     const result = await pool.query('SELECT value FROM settings WHERE key = $1', ['shipping']);
-    const settings = result.rows[0]?.value || { mode: 'fixed', fixed_percentage: 5 };
+    const settings = result.rows[0]?.value || { flat_rate: 0, tax_mode: 'flat', tax_percentage: 0 };
     res.json(settings);
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
@@ -414,12 +421,16 @@ router.get('/settings/shipping', authMiddleware, adminOnly, async (req, res) => 
 
 // POST /api/admin/settings/shipping
 router.post('/settings/shipping', authMiddleware, adminOnly, async (req, res) => {
-  const { mode, fixed_percentage } = req.body;
   try {
-    const value = JSON.stringify({ mode, fixed_percentage: parseFloat(fixed_percentage) });
+    const existing = await pool.query('SELECT value FROM settings WHERE key = $1', ['shipping']);
+    const current = existing.rows[0]?.value || {};
+    const merged = { ...current, ...req.body };
+    if (merged.flat_rate !== undefined) merged.flat_rate = parseFloat(merged.flat_rate) || 0;
+    if (merged.tax_percentage !== undefined) merged.tax_percentage = parseFloat(merged.tax_percentage) || 0;
+    if (merged.tax_mode !== undefined) merged.tax_mode = merged.tax_mode === 'pincode' ? 'pincode' : 'flat';
     await pool.query(
       'INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()',
-      ['shipping', value]
+      ['shipping', JSON.stringify(merged)]
     );
     res.json({ success: true });
   } catch (err) {
@@ -480,9 +491,9 @@ router.get('/settings/announcement', authMiddleware, adminOnly, async (req, res)
 
 // POST /api/admin/settings/announcement
 router.post('/settings/announcement', authMiddleware, adminOnly, async (req, res) => {
-  const { text, is_active, link } = req.body;
+  const { text, is_active, link, items } = req.body;
   try {
-    const value = JSON.stringify({ text, is_active, link });
+    const value = JSON.stringify({ text, is_active, link, items: items || [] });
     await pool.query(
       `INSERT INTO settings (key, value) VALUES ('announcement_bar', $1)
        ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()`,
