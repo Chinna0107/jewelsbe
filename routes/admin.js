@@ -239,7 +239,7 @@ router.delete('/banners/:id', authMiddleware, adminOnly, async (req, res) => {
 // --- Coupons ---
 router.get('/coupons', authMiddleware, adminOnly, async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM coupons ORDER BY created_at DESC');
+    const result = await pool.query('SELECT c.*, u.name as user_name FROM coupons c LEFT JOIN users u ON c.user_id = u.id ORDER BY c.created_at DESC');
     res.json({ coupons: result.rows });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -247,12 +247,13 @@ router.get('/coupons', authMiddleware, adminOnly, async (req, res) => {
 });
 
 router.post('/coupons', authMiddleware, adminOnly, async (req, res) => {
-  const { code, discount_type, discount_value, min_order_value, is_active, expires_at } = req.body;
+  const { code, discount_type, discount_value, min_order_value, is_active, expires_at, user_id } = req.body;
   try {
     const validExpiresAt = expires_at === "" ? null : expires_at;
+    const targetUserId = user_id && user_id !== 'all' ? user_id : null;
     const result = await pool.query(
-      'INSERT INTO coupons (code, discount_type, discount_value, min_order_value, is_active, expires_at) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
-      [code, discount_type || 'percentage', discount_value || 0, min_order_value || 0, is_active ?? true, validExpiresAt]
+      'INSERT INTO coupons (code, discount_type, discount_value, min_order_value, is_active, expires_at, user_id) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *',
+      [code, discount_type || 'percentage', discount_value || 0, min_order_value || 0, is_active ?? true, validExpiresAt, targetUserId]
     );
     res.json({ coupon: result.rows[0] });
   } catch (err) {
@@ -261,12 +262,13 @@ router.post('/coupons', authMiddleware, adminOnly, async (req, res) => {
 });
 
 router.put('/coupons/:id', authMiddleware, adminOnly, async (req, res) => {
-  const { code, discount_type, discount_value, min_order_value, is_active, expires_at } = req.body;
+  const { code, discount_type, discount_value, min_order_value, is_active, expires_at, user_id } = req.body;
   try {
     const validExpiresAt = expires_at === "" ? null : expires_at;
+    const targetUserId = user_id && user_id !== 'all' ? user_id : null;
     const result = await pool.query(
-      'UPDATE coupons SET code=$1, discount_type=$2, discount_value=$3, min_order_value=$4, is_active=$5, expires_at=$6 WHERE id=$7 RETURNING *',
-      [code, discount_type || 'percentage', discount_value || 0, min_order_value || 0, is_active ?? true, validExpiresAt, req.params.id]
+      'UPDATE coupons SET code=$1, discount_type=$2, discount_value=$3, min_order_value=$4, is_active=$5, expires_at=$6, user_id=$7 WHERE id=$8 RETURNING *',
+      [code, discount_type || 'percentage', discount_value || 0, min_order_value || 0, is_active ?? true, validExpiresAt, targetUserId, req.params.id]
     );
     res.json({ coupon: result.rows[0] });
   } catch (err) {
@@ -335,5 +337,129 @@ router.delete('/categories/:id', authMiddleware, adminOnly, async (req, res) => 
     res.status(500).json({ error: 'Server error' });
   }
 });
+// ================== OFFERS ==================
 
+// GET /api/admin/offers
+router.get('/offers', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM offers ORDER BY created_at DESC');
+    res.json({ offers: result.rows });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/admin/offers
+router.post('/offers', authMiddleware, adminOnly, async (req, res) => {
+  const { title, discount_percentage, is_active } = req.body;
+  try {
+    const result = await pool.query(
+      'INSERT INTO offers (title, discount_percentage, is_active) VALUES ($1, $2, $3) RETURNING *',
+      [title, discount_percentage, is_active ?? true]
+    );
+    res.json({ offer: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// PUT /api/admin/offers/:id
+router.put('/offers/:id', authMiddleware, adminOnly, async (req, res) => {
+  const { title, discount_percentage, is_active } = req.body;
+  try {
+    const result = await pool.query(
+      'UPDATE offers SET title=$1, discount_percentage=$2, is_active=$3 WHERE id=$4 RETURNING *',
+      [title, discount_percentage, is_active, req.params.id]
+    );
+    res.json({ offer: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// DELETE /api/admin/offers/:id
+router.delete('/offers/:id', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM offers WHERE id=$1', [req.params.id]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/admin/offers/:id/apply
+router.post('/offers/:id/apply', authMiddleware, adminOnly, async (req, res) => {
+  const { category, productIds } = req.body;
+  try {
+    if (category) {
+      await pool.query('UPDATE products SET offer_id=$1 WHERE category=$2', [req.params.id, category]);
+    } else if (productIds && productIds.length > 0) {
+      await pool.query('UPDATE products SET offer_id=$1 WHERE id = ANY($2)', [req.params.id, productIds]);
+    }
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+// GET /api/admin/settings/shipping
+router.get('/settings/shipping', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT value FROM settings WHERE key = $1', ['shipping']);
+    const settings = result.rows[0]?.value || { mode: 'fixed', fixed_percentage: 5 };
+    res.json(settings);
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/admin/settings/shipping
+router.post('/settings/shipping', authMiddleware, adminOnly, async (req, res) => {
+  const { mode, fixed_percentage } = req.body;
+  try {
+    const value = JSON.stringify({ mode, fixed_percentage: parseFloat(fixed_percentage) });
+    await pool.query(
+      'INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()',
+      ['shipping', value]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/admin/shipping-pincodes
+router.get('/shipping-pincodes', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM shipping_pincodes ORDER BY created_at DESC');
+    res.json({ pincodes: result.rows });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/admin/shipping-pincodes
+router.post('/shipping-pincodes', authMiddleware, adminOnly, async (req, res) => {
+  const { pincode, percentage } = req.body;
+  try {
+    const result = await pool.query(
+      'INSERT INTO shipping_pincodes (pincode, percentage) VALUES ($1, $2) RETURNING *',
+      [pincode, percentage]
+    );
+    res.json({ pincode: result.rows[0] });
+  } catch (err) {
+    // 23505 is unique violation
+    if (err.code === '23505') return res.status(400).json({ error: 'Pincode already exists' });
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// DELETE /api/admin/shipping-pincodes/:id
+router.delete('/shipping-pincodes/:id', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM shipping_pincodes WHERE id=$1', [req.params.id]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
 module.exports = router;

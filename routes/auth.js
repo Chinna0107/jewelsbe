@@ -3,8 +3,10 @@ const pool = require('../db');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const nodemailer = require('nodemailer');
+const { OAuth2Client } = require('google-auth-library');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'fallback_secret';
+const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
 const transporter = nodemailer.createTransport({
   service: 'gmail',
@@ -18,8 +20,8 @@ function generateOTP() {
 async function sendOrderEmailToAdmin(orderNumber, total) {
   try {
     await transporter.sendMail({
-      from: `"Moksha Mandir" <${process.env.EMAIL_USER}>`,
-      to: 'sakethkotha48@gmail.com',
+      from: `"Houra Jewels" <${process.env.EMAIL_USER}>`,
+      to: 'kancharlahemanth89@gmail.com',
       subject: `New Order Received - ${orderNumber}`,
       html: `
         <h2>New Order Placed (Auth User)!</h2>
@@ -35,9 +37,9 @@ async function sendOrderEmailToAdmin(orderNumber, total) {
 
 async function sendOTPEmail(email, otp, name) {
   await transporter.sendMail({
-    from: `"Moksha Mandir" <${process.env.EMAIL_USER}>`,
+    from: `"Houra Jewels" <${process.env.EMAIL_USER}>`,
     to: email,
-    subject: 'Your OTP for Moksha Mandir Signup',
+    subject: 'Your OTP for Houra Jewels Signup',
     html: `
       <div style="font-family:Arial,sans-serif;max-width:480px;margin:auto;padding:24px;border:1px solid #f0e0c0;border-radius:12px;">
         <h2 style="color:#b45309;">🙏 Welcome to Moksha Mandir</h2>
@@ -150,6 +152,48 @@ router.post('/login', async (req, res) => {
   }
 });
 
+// POST /api/auth/google
+router.post('/google', async (req, res) => {
+  const { idToken } = req.body;
+  if (!idToken) return res.status(400).json({ error: 'Access token required' });
+
+  try {
+    // We are passing access_token as idToken from frontend to avoid changing store signature
+    const response = await require('axios').get('https://www.googleapis.com/oauth2/v3/userinfo', {
+      headers: { Authorization: `Bearer ${idToken}` }
+    });
+    const { email, name, picture } = response.data;
+
+    if (!email) return res.status(400).json({ error: 'Email not found in Google account' });
+
+    let result = await pool.query('SELECT * FROM users WHERE email=$1', [email]);
+    let user;
+
+    if (result.rows.length) {
+      user = result.rows[0];
+      // Update verified status and avatar if not already set
+      if (!user.is_verified) {
+        await pool.query('UPDATE users SET is_verified=TRUE, avatar_url=$1 WHERE id=$2', [picture, user.id]);
+        user.is_verified = true;
+        user.avatar_url = picture;
+      }
+    } else {
+      // Create new user
+      const insertRes = await pool.query(
+        'INSERT INTO users (name, email, is_verified, avatar_url, role) VALUES ($1,$2,$3,$4,$5) RETURNING *',
+        [name, email, true, picture, 'user']
+      );
+      user = insertRes.rows[0];
+    }
+
+    const token = jwt.sign({ id: user.id, email: user.email, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
+    res.json({ token, user: { id: user.id, name: user.name, email: user.email, phone: user.phone, role: user.role, avatar_url: user.avatar_url } });
+  } catch (err) {
+    console.error('Google Auth Error:', err);
+    res.status(500).json({ error: 'Failed to authenticate with Google' });
+  }
+});
+
 // GET /api/auth/profile
 router.get('/profile', authMiddleware, async (req, res) => {
   try {
@@ -200,7 +244,7 @@ router.post('/address', authMiddleware, async (req, res) => {
 // POST /api/auth/orders
 router.post('/orders', authMiddleware, async (req, res) => {
   const { items, address, total, coupon_code, payment_method, advance_paid } = req.body;
-  
+
   if (!items || items.length === 0) {
     return res.status(400).json({ error: 'Cart is empty' });
   }
@@ -211,13 +255,13 @@ router.post('/orders', authMiddleware, async (req, res) => {
     const addressJson = JSON.stringify(address);
     const pMethod = payment_method || 'prepaid';
     const advancePaid = pMethod === 'cod' ? 100 : (parseFloat(total) || 0);
-    
+
     const result = await pool.query(
       `INSERT INTO orders (user_id, order_number, total, items, address, status, payment_method, advance_paid)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
       [req.user.id, orderNumber, total, itemsJson, addressJson, 'pending', pMethod, advancePaid]
     );
-    
+
     // Send email to admin
     sendOrderEmailToAdmin(orderNumber, total);
 
@@ -264,6 +308,22 @@ router.get('/me', authMiddleware, async (req, res) => {
     res.json({ user: user.rows[0] });
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
+  }
+});
+// GET /api/auth/my-coupons
+router.get('/my-coupons', authMiddleware, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT * FROM coupons 
+       WHERE is_active = true 
+       AND (user_id IS NULL OR user_id = $1) 
+       AND (expires_at IS NULL OR expires_at > NOW())
+       ORDER BY user_id NULLS LAST, created_at DESC`,
+      [req.user.id]
+    );
+    res.json({ coupons: result.rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 

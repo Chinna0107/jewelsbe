@@ -152,12 +152,16 @@ router.get('/banners', async (req, res) => {
 
 // POST /api/general/validate-coupon
 router.post('/validate-coupon', async (req, res) => {
-  const { code, cartValue } = req.body;
+  const { code, cartValue, user_id } = req.body;
   try {
     const result = await pool.query('SELECT * FROM coupons WHERE code=$1 AND is_active=true', [code]);
     const coupon = result.rows[0];
     
     if (!coupon) return res.status(404).json({ error: 'Invalid or inactive coupon code' });
+
+    if (coupon.user_id && String(coupon.user_id) !== String(user_id)) {
+      return res.status(403).json({ error: 'This coupon is not valid for your account' });
+    }
     
     if (coupon.expires_at && new Date() > new Date(coupon.expires_at)) {
       return res.status(400).json({ error: 'Coupon has expired' });
@@ -168,6 +172,31 @@ router.post('/validate-coupon', async (req, res) => {
     }
     
     res.json({ success: true, coupon });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/general/offers
+router.get('/offers', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM offers WHERE is_active=true ORDER BY created_at DESC');
+    res.json({ offers: result.rows });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/general/shipping
+router.get('/shipping', async (req, res) => {
+  try {
+    const settingsRes = await pool.query('SELECT value FROM settings WHERE key = $1', ['shipping']);
+    const settings = settingsRes.rows[0]?.value || { mode: 'fixed', fixed_percentage: 5 };
+    
+    const pincodesRes = await pool.query('SELECT pincode, percentage FROM shipping_pincodes');
+    const pincodes = pincodesRes.rows;
+    
+    res.json({ settings, pincodes });
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
   }

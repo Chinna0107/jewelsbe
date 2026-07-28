@@ -64,8 +64,21 @@ async function setup() {
       is_bestseller BOOLEAN DEFAULT FALSE,
       is_trending BOOLEAN DEFAULT FALSE,
       is_offer BOOLEAN DEFAULT FALSE,
+      offer_id INTEGER,
       created_at TIMESTAMP DEFAULT NOW()
     );
+
+    CREATE TABLE IF NOT EXISTS offers (
+      id SERIAL PRIMARY KEY,
+      title VARCHAR(255) NOT NULL,
+      discount_percentage NUMERIC(5,2) NOT NULL,
+      is_active BOOLEAN DEFAULT TRUE,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+
+    ALTER TABLE products 
+      ADD COLUMN IF NOT EXISTS offer_id INTEGER REFERENCES offers(id) ON DELETE SET NULL;
+
 
     CREATE TABLE IF NOT EXISTS banners (
       id SERIAL PRIMARY KEY,
@@ -84,6 +97,7 @@ async function setup() {
       min_order_value NUMERIC(10,2) DEFAULT 0,
       is_active BOOLEAN DEFAULT TRUE,
       expires_at TIMESTAMP,
+      user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
       created_at TIMESTAMP DEFAULT NOW()
     );
 
@@ -94,6 +108,26 @@ async function setup() {
       image_url TEXT,
       created_at TIMESTAMP DEFAULT NOW()
     );
+
+    CREATE TABLE IF NOT EXISTS settings (
+      key VARCHAR(100) PRIMARY KEY,
+      value JSONB,
+      updated_at TIMESTAMP DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS shipping_pincodes (
+      id SERIAL PRIMARY KEY,
+      pincode VARCHAR(20) UNIQUE NOT NULL,
+      percentage NUMERIC(5,2) NOT NULL,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
+
+  // Insert default shipping settings if not exists
+  await pool.query(`
+    INSERT INTO settings (key, value) 
+    VALUES ('shipping', '{"mode": "fixed", "fixed_percentage": 5}') 
+    ON CONFLICT (key) DO NOTHING;
   `);
   console.log('✅ Tables created');
 
