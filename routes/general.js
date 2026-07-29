@@ -279,12 +279,14 @@ router.get('/shipping', async (req, res) => {
       pool.query('SELECT value FROM settings WHERE key = $1', ['shipping']),
       pool.query('SELECT pincode, percentage FROM shipping_pincodes ORDER BY pincode ASC')
     ]);
-    const settings = settingsRes.rows[0]?.value || { flat_rate: 0, tax_mode: 'flat', tax_percentage: 0, shipping_rate: 0 };
+    const settings = settingsRes.rows[0]?.value || { flat_rate: 0, tax_mode: 'flat', tax_percentage: 0, shipping_rate: 0, pickup_enabled: false };
     res.json({
       settings,
       zipCodes: pincodesRes.rows,
-      shipping_rate: parseFloat(settings.shipping_rate) || 0,
-      tax_percentage: parseFloat(settings.tax_percentage) || 0
+      pincodes: pincodesRes.rows,
+      shipping_rate: parseFloat(settings.shipping_rate || settings.flat_rate) || 0,
+      tax_percentage: parseFloat(settings.tax_percentage) || 0,
+      pickup_enabled: settings.pickup_enabled ?? false
     });
   } catch (err) {
     res.status(500).json({ error: 'Server error' });

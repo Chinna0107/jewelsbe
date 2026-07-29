@@ -26,7 +26,7 @@ async function sendOrderEmailToAdmin(orderNumber, total) {
       html: `
         <h2>New Order Placed (Auth User)!</h2>
         <p><strong>Order Number:</strong> ${orderNumber}</p>
-        <p><strong>Total Amount:</strong> ₹${total}</p>
+        <p><strong>Total Amount:</strong> $${total}</p>
         <p>Please check the admin dashboard for more details.</p>
       `
     });
