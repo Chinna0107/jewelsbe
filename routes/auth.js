@@ -121,7 +121,7 @@ router.post('/verify-otp', async (req, res) => {
 
     const user = await pool.query('SELECT id, name, email, phone, role FROM users WHERE email=$1', [email]);
     const u = user.rows[0];
-    const token = jwt.sign({ id: u.id, email, role: u.role }, JWT_SECRET, { expiresIn: '7d' });
+    const token = jwt.sign({ id: u.id, email, role: u.role }, JWT_SECRET, { expiresIn: '30d' });
     res.json({ token, user: u });
   } catch (err) {
     console.error(err);
@@ -144,7 +144,7 @@ router.post('/login', async (req, res) => {
     const valid = await bcrypt.compare(password, user.password_hash);
     if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
 
-    const token = jwt.sign({ id: user.id, email: user.email, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
+    const token = jwt.sign({ id: user.id, email: user.email, role: user.role }, JWT_SECRET, { expiresIn: '30d' });
     res.json({ token, user: { id: user.id, name: user.name, email: user.email, phone: user.phone, role: user.role } });
   } catch (err) {
     console.error(err);
@@ -186,7 +186,7 @@ router.post('/google', async (req, res) => {
       user = insertRes.rows[0];
     }
 
-    const token = jwt.sign({ id: user.id, email: user.email, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
+    const token = jwt.sign({ id: user.id, email: user.email, role: user.role }, JWT_SECRET, { expiresIn: '30d' });
     res.json({ token, user: { id: user.id, name: user.name, email: user.email, phone: user.phone, role: user.role, avatar_url: user.avatar_url } });
   } catch (err) {
     console.error('Google Auth Error:', err);
