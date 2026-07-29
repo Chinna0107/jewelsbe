@@ -243,14 +243,16 @@ router.post('/address', authMiddleware, async (req, res) => {
 
 // POST /api/auth/orders
 router.post('/orders', authMiddleware, async (req, res) => {
-  const { items, address, total, coupon_code, payment_method, advance_paid, order_type } = req.body;
+  const { items, address, total, coupon_code, payment_method, advance_paid, order_type, stripe_payment_intent_id } = req.body;
 
   if (!items || items.length === 0) {
     return res.status(400).json({ error: 'Cart is empty' });
   }
 
   try {
-    const orderNumber = `ORD-${Date.now()}`;
+    const countRes = await pool.query(`SELECT COUNT(*) FROM orders`);
+    const nextNum = parseInt(countRes.rows[0].count) + 1;
+    const orderNumber = `HJ-${String(nextNum).padStart(6, '0')}`;
     const itemsJson = JSON.stringify(items);
     const addressJson = JSON.stringify(address || {});
     const pMethod = payment_method || 'prepaid';
@@ -258,9 +260,9 @@ router.post('/orders', authMiddleware, async (req, res) => {
     const oType = order_type === 'pickup' ? 'pickup' : 'shipping';
 
     const result = await pool.query(
-      `INSERT INTO orders (user_id, order_number, total, items, address, status, payment_method, advance_paid, order_type)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
-      [req.user.id, orderNumber, total, itemsJson, addressJson, 'pending', pMethod, advancePaid, oType]
+      `INSERT INTO orders (user_id, order_number, total, items, address, status, payment_method, advance_paid, order_type, stripe_payment_intent_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+      [req.user.id, orderNumber, total, itemsJson, addressJson, 'pending', pMethod, advancePaid, oType, stripe_payment_intent_id || null]
     );
 
     // Reduce Stock Logic
@@ -367,6 +369,55 @@ router.get('/my-coupons', authMiddleware, async (req, res) => {
       [req.user.id]
     );
     res.json({ coupons: result.rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/auth/forgot-password — send OTP
+router.post('/forgot-password', async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ error: 'Email required' });
+  try {
+    const result = await pool.query('SELECT id, name FROM users WHERE email=$1', [email]);
+    if (!result.rows[0]) return res.status(404).json({ error: 'No account found with this email' });
+    const otp = generateOTP();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+    await pool.query('DELETE FROM otps WHERE email=$1', [email]);
+    await pool.query('INSERT INTO otps (email, otp, expires_at) VALUES ($1,$2,$3)', [email, otp, expiresAt]);
+    await transporter.sendMail({
+      from: `"Houra Jewels" <${process.env.EMAIL_USER}>`,
+      to: email,
+      subject: 'Reset Your Houra Jewels Password',
+      html: `
+        <div style="font-family:Arial,sans-serif;max-width:480px;margin:auto;padding:24px;border:1px solid #f0e0c0;border-radius:12px;">
+          <h2 style="color:#b45309;">🔐 Password Reset</h2>
+          <p>Hi <strong>${result.rows[0].name}</strong>,</p>
+          <p>Your OTP to reset your password is:</p>
+          <div style="font-size:36px;font-weight:bold;color:#ea580c;letter-spacing:8px;text-align:center;padding:16px;background:#fff7ed;border-radius:8px;margin:16px 0;">${otp}</div>
+          <p style="color:#6b7280;font-size:13px;">Valid for 10 minutes. Do not share it with anyone.</p>
+        </div>
+      `,
+    });
+    res.json({ success: true, message: 'OTP sent to your email' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/auth/reset-password — verify OTP + set new password
+router.post('/reset-password', async (req, res) => {
+  const { email, otp, newPassword } = req.body;
+  if (!email || !otp || !newPassword) return res.status(400).json({ error: 'All fields required' });
+  try {
+    const otpRes = await pool.query('SELECT * FROM otps WHERE email=$1 AND otp=$2', [email, otp]);
+    const record = otpRes.rows[0];
+    if (!record) return res.status(400).json({ error: 'Invalid OTP' });
+    if (new Date() > new Date(record.expires_at)) return res.status(400).json({ error: 'OTP expired' });
+    const hash = await bcrypt.hash(newPassword, 10);
+    await pool.query('UPDATE users SET password_hash=$1 WHERE email=$2', [hash, email]);
+    await pool.query('DELETE FROM otps WHERE email=$1', [email]);
+    res.json({ success: true, message: 'Password reset successfully' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

@@ -1,7 +1,7 @@
 const router = require('express').Router();
 const pool = require('../db');
-const Razorpay = require('razorpay');
-const crypto = require('crypto');
+const Stripe = require('stripe');
+const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 const nodemailer = require('nodemailer');
 
 const transporter = nodemailer.createTransport({
@@ -100,14 +100,16 @@ router.post('/products/:id/reviews', async (req, res) => {
 
 // POST /api/general/orders (Checkout)
 router.post('/orders', async (req, res) => {
-  const { items, address, total, coupon_code, payment_method, advance_paid, order_type } = req.body;
+  const { items, address, total, coupon_code, payment_method, advance_paid, order_type, stripe_payment_intent_id } = req.body;
   
   if (!items || items.length === 0) {
     return res.status(400).json({ error: 'Cart is empty' });
   }
 
   try {
-    const orderNumber = `ORD-${Date.now()}`;
+    const countRes = await pool.query(`SELECT COUNT(*) FROM orders`);
+    const nextNum = parseInt(countRes.rows[0].count) + 1;
+    const orderNumber = `HJ-${String(nextNum).padStart(6, '0')}`;
     const itemsJson = JSON.stringify(items);
     const addressJson = JSON.stringify(address || {});
     const pMethod = payment_method || 'prepaid';
@@ -115,9 +117,9 @@ router.post('/orders', async (req, res) => {
     const oType = order_type === 'pickup' ? 'pickup' : 'shipping';
     
     const result = await pool.query(
-      `INSERT INTO orders (order_number, total, items, address, status, payment_method, advance_paid, order_type)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-      [orderNumber, total, itemsJson, addressJson, 'pending', pMethod, advancePaid, oType]
+      `INSERT INTO orders (order_number, total, items, address, status, payment_method, advance_paid, order_type, stripe_payment_intent_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+      [orderNumber, total, itemsJson, addressJson, 'pending', pMethod, advancePaid, oType, stripe_payment_intent_id || null]
     );
     
     // Reduce Stock Logic
@@ -173,55 +175,37 @@ router.post('/orders', async (req, res) => {
   }
 });
 
-// POST /api/general/razorpay/order
-router.post('/razorpay/order', async (req, res) => {
+// POST /api/general/stripe/create-payment-intent
+router.post('/stripe/create-payment-intent', async (req, res) => {
   const { amount } = req.body;
-  if (!amount) {
-    return res.status(400).json({ error: 'Amount is required' });
-  }
-
+  if (!amount) return res.status(400).json({ error: 'Amount is required' });
   try {
-    const razorpay = new Razorpay({
-      key_id: process.env.RAZORPAY_KEY_ID,
-      key_secret: process.env.RAZORPAY_KEY_SECRET,
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: Math.round(amount * 100), // cents
+      currency: 'usd',
+      automatic_payment_methods: { enabled: true },
     });
-
-    const options = {
-      amount: Math.round(amount * 100), // amount in the smallest currency unit
-      currency: 'INR',
-      receipt: `receipt_${Date.now()}`
-    };
-
-    const order = await razorpay.orders.create(options);
-    res.json({ success: true, order });
+    res.json({ success: true, clientSecret: paymentIntent.client_secret, paymentIntentId: paymentIntent.id });
   } catch (err) {
-    console.error('Razorpay order creation error:', err);
-    res.status(500).json({ error: 'Failed to create Razorpay order' });
+    console.error('Stripe error:', err);
+    res.status(500).json({ error: err.message });
   }
 });
 
-// POST /api/general/razorpay/verify
-router.post('/razorpay/verify', async (req, res) => {
-  const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
-
-  if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
-    return res.status(400).json({ error: 'Missing payment details' });
-  }
-
+// POST /api/general/stripe/verify
+router.post('/stripe/verify', async (req, res) => {
+  const { paymentIntentId } = req.body;
+  if (!paymentIntentId) return res.status(400).json({ error: 'paymentIntentId required' });
   try {
-    const generated_signature = crypto
-      .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
-      .update(razorpay_order_id + '|' + razorpay_payment_id)
-      .digest('hex');
-
-    if (generated_signature === razorpay_signature) {
-      res.json({ success: true, message: 'Payment verified successfully' });
+    const intent = await stripe.paymentIntents.retrieve(paymentIntentId);
+    if (intent.status === 'succeeded') {
+      res.json({ success: true });
     } else {
-      res.status(400).json({ error: 'Invalid signature' });
+      res.status(400).json({ error: `Payment not completed. Status: ${intent.status}` });
     }
   } catch (err) {
-    console.error('Razorpay verification error:', err);
-    res.status(500).json({ error: 'Verification failed' });
+    console.error('Stripe verify error:', err);
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -295,8 +279,23 @@ router.get('/shipping', async (req, res) => {
       pool.query('SELECT value FROM settings WHERE key = $1', ['shipping']),
       pool.query('SELECT pincode, percentage FROM shipping_pincodes ORDER BY pincode ASC')
     ]);
-    const settings = settingsRes.rows[0]?.value || { flat_rate: 0, tax_mode: 'flat', tax_percentage: 0 };
-    res.json({ settings, pincodes: pincodesRes.rows });
+    const settings = settingsRes.rows[0]?.value || { flat_rate: 0, tax_mode: 'flat', tax_percentage: 0, shipping_rate: 0 };
+    res.json({
+      settings,
+      zipCodes: pincodesRes.rows,
+      shipping_rate: parseFloat(settings.shipping_rate) || 0,
+      tax_percentage: parseFloat(settings.tax_percentage) || 0
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/general/reviews
+router.get('/reviews', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM reviews WHERE is_active=true ORDER BY created_at DESC');
+    res.json({ reviews: result.rows });
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
   }

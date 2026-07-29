@@ -75,6 +75,44 @@ router.put('/orders/:id/status', authMiddleware, adminOnly, async (req, res) => 
   }
 });
 
+// POST /api/admin/orders/:id/refund
+const Stripe = require('stripe');
+router.post('/orders/:id/refund', authMiddleware, adminOnly, async (req, res) => {
+  const { refund_breakdown } = req.body;
+  try {
+    const orderRes = await pool.query('SELECT * FROM orders WHERE id=$1', [req.params.id]);
+    const order = orderRes.rows[0];
+    if (!order) return res.status(404).json({ error: 'Order not found' });
+
+    const refundAmount = parseFloat(refund_breakdown?.total) || parseFloat(order.total) || 0;
+
+    // Only attempt Stripe refund if paid via Stripe and has a payment intent
+    let refundId = null;
+    if (order.stripe_payment_intent_id) {
+      const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
+      const refund = await stripe.refunds.create({
+        payment_intent: order.stripe_payment_intent_id,
+        amount: Math.round(refundAmount * 100), // cents
+      });
+      refundId = refund.id;
+    } else {
+      // No payment intent stored — mark as manual refund
+      refundId = `MANUAL-${Date.now()}`;
+    }
+
+    // Update order: cancelled + store refund info
+    await pool.query(
+      `UPDATE orders SET status='cancelled', refund_id=$1, refund_amount=$2, refund_breakdown=$3 WHERE id=$4`,
+      [refundId, refundAmount, JSON.stringify(refund_breakdown || {}), req.params.id]
+    );
+
+    res.json({ success: true, refund_id: refundId, amount: refundAmount });
+  } catch (err) {
+    console.error('Refund error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 const shiprocket = require('../utils/shiprocket');
 
 // POST /api/admin/orders/:id/ship
@@ -503,6 +541,91 @@ router.post('/settings/announcement', authMiddleware, adminOnly, async (req, res
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// --- REVIEWS ---
+
+// GET /api/admin/reviews
+router.get('/reviews', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM reviews ORDER BY created_at DESC');
+    res.json({ reviews: result.rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/admin/reviews
+router.post('/reviews', authMiddleware, adminOnly, async (req, res) => {
+  const { name, rating, review, is_active } = req.body;
+  if (!name || !review) return res.status(400).json({ error: 'Name and review are required' });
+  try {
+    const result = await pool.query(
+      'INSERT INTO reviews (name, rating, review, is_active) VALUES ($1, $2, $3, $4) RETURNING *',
+      [name, rating || 5, review, is_active ?? true]
+    );
+    res.json({ review: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PUT /api/admin/reviews/:id
+router.put('/reviews/:id', authMiddleware, adminOnly, async (req, res) => {
+  const { name, rating, review, is_active } = req.body;
+  try {
+    const result = await pool.query(
+      'UPDATE reviews SET name=$1, rating=$2, review=$3, is_active=$4 WHERE id=$5 RETURNING *',
+      [name, rating || 5, review, is_active ?? true, req.params.id]
+    );
+    res.json({ review: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/admin/reviews/:id
+router.delete('/reviews/:id', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM reviews WHERE id=$1', [req.params.id]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/admin/settings/shipping-rate
+router.post('/settings/shipping-rate', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const { shipping_rate } = req.body;
+    const existing = await pool.query('SELECT value FROM settings WHERE key=$1', ['shipping']);
+    const current = existing.rows[0]?.value || {};
+    const merged = { ...current, shipping_rate: parseFloat(shipping_rate) || 0 };
+    await pool.query(
+      'INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value=$2, updated_at=NOW()',
+      ['shipping', JSON.stringify(merged)]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/admin/settings/tax
+router.post('/settings/tax', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const { tax_percentage } = req.body;
+    const existing = await pool.query('SELECT value FROM settings WHERE key=$1', ['shipping']);
+    const current = existing.rows[0]?.value || {};
+    const merged = { ...current, tax_percentage: parseFloat(tax_percentage) || 0 };
+    await pool.query(
+      'INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value=$2, updated_at=NOW()',
+      ['shipping', JSON.stringify(merged)]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
