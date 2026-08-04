@@ -16,6 +16,8 @@ async function setup() {
 
     ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(20) DEFAULT 'user';
 
+    ALTER TABLE addresses ADD COLUMN IF NOT EXISTS country VARCHAR(100);
+
     CREATE TABLE IF NOT EXISTS otps (
       id SERIAL PRIMARY KEY,
       email VARCHAR(150) NOT NULL,

@@ -2,30 +2,7 @@ const router = require('express').Router();
 const pool = require('../db');
 const Stripe = require('stripe');
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
-const nodemailer = require('nodemailer');
-
-const transporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
-});
-
-async function sendOrderEmailToAdmin(orderNumber, total) {
-  try {
-    await transporter.sendMail({
-      from: `"Houra Jewels" <${process.env.EMAIL_USER}>`,
-      to: 'kancharlahemanth89@gmail.com',
-      subject: `New Order Received - ${orderNumber}`,
-      html: `
-        <h2>New Order Placed (Guest)!</h2>
-        <p><strong>Order Number:</strong> ${orderNumber}</p>
-        <p><strong>Total Amount:</strong> ₹${total}</p>
-        <p>Please check the admin dashboard for more details.</p>
-      `
-    });
-  } catch (err) {
-    console.error('Email send failed:', err);
-  }
-}
+const { sendOrderEmailToAdmin } = require('../utils/email');
 
 // GET /api/general/db-test
 router.get('/db-test', async (req, res) => {
@@ -166,7 +143,7 @@ router.post('/orders', async (req, res) => {
     }
 
     // Send email to admin
-    sendOrderEmailToAdmin(orderNumber, total);
+    sendOrderEmailToAdmin(orderNumber, total, address, items);
     
     res.json({ success: true, order: result.rows[0] });
   } catch (err) {

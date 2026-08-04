@@ -8,9 +8,9 @@ const PORT = process.env.PORT || 5000;
 const allowedOrigins = [
   'http://localhost:5173',
   'https://jewels-teal.vercel.app',
-  // 'https://www.mokshamandir.in',
+  'https://jewels-teal.vercel.app/',
   process.env.FRONTEND_URL
-];
+].filter(Boolean);
 
 app.use(cors({
   origin: function (origin, callback) {
@@ -20,8 +20,11 @@ app.use(cors({
       callback(new Error('Not allowed by CORS'));
     }
   },
-  credentials: true
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
 }));
+app.options('*', cors());
 app.use(express.json());
 
 const path = require('path');
