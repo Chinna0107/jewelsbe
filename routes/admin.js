@@ -1,6 +1,8 @@
 const router = require('express').Router();
 const pool = require('../db');
 const { authMiddleware } = require('./auth');
+const { Shippo } = require('shippo');
+const shippoClient = process.env.SHIPPO_API_KEY ? new Shippo({ apiKeyHeader: process.env.SHIPPO_API_KEY }) : null;
 
 function adminOnly(req, res, next) {
   if (req.user?.role !== 'admin') return res.status(403).json({ error: 'Admin access only' });
@@ -178,6 +180,136 @@ router.post('/orders/:id/ship', authMiddleware, adminOnly, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// POST /api/admin/orders/:id/shippo-rates
+router.post('/orders/:id/shippo-rates', authMiddleware, adminOnly, async (req, res) => {
+  if (!shippoClient) return res.status(500).json({ error: 'Shippo is not configured in backend' });
+
+  try {
+    const orderRes = await pool.query('SELECT * FROM orders WHERE id=$1', [req.params.id]);
+    const order = orderRes.rows[0];
+    if (!order) return res.status(404).json({ error: 'Order not found' });
+
+    let address = {};
+    try { address = typeof order.address === 'string' ? JSON.parse(order.address) : (order.address || {}); } catch(e) {}
+
+    const addressFrom = {
+      name: 'Houra Jewels',
+      street1: '123 Main St',
+      city: 'San Francisco',
+      state: 'CA',
+      zip: '94117',
+      country: 'US',
+      phone: '+1 555 341 9393',
+      email: 'admin@hourajewels.com',
+    };
+
+    const addressTo = {
+      name: address.name || 'Customer',
+      street1: address.line1 || 'No Address',
+      street2: address.line2 || '',
+      city: address.city || 'City',
+      state: address.state || '',
+      zip: address.pincode || '00000',
+      country: address.country || 'US',
+      phone: address.mobile || '0000000000',
+    };
+
+    const parcel = {
+      length: '5',
+      width: '5',
+      height: '5',
+      distanceUnit: 'in',
+      weight: '16',
+      massUnit: 'oz',
+    };
+
+    const shipmentPayload = {
+      addressFrom: addressFrom,
+      addressTo: addressTo,
+      parcels: [parcel],
+      async: false
+    };
+
+    if (addressFrom.country !== addressTo.country) {
+      shipmentPayload.customsDeclaration = {
+        contentsType: 'MERCHANDISE',
+        nonDeliveryOption: 'RETURN',
+        certify: true,
+        certifySigner: 'Houra Jewels',
+        eelPfc: 'NOEEI_30_37_a',
+        items: [{
+          description: 'Jewelry',
+          quantity: 1,
+          netWeight: '16',
+          massUnit: 'oz',
+          valueAmount: (order.total || 10).toString(),
+          valueCurrency: 'USD',
+          originCountry: addressFrom.country
+        }]
+      };
+    }
+
+    const shipment = await shippoClient.shipments.create(shipmentPayload);
+
+    const rates = shipment.rates;
+    if (!rates || rates.length === 0) {
+      return res.status(400).json({ error: 'No shipping rates found for this address.' });
+    }
+    res.json({ rates });
+  } catch (err) {
+    console.error('Shippo error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/admin/orders/:id/shippo-label
+router.post('/orders/:id/shippo-label', authMiddleware, adminOnly, async (req, res) => {
+  if (!shippoClient) return res.status(500).json({ error: 'Shippo is not configured in backend' });
+
+  const { rateObjectId } = req.body;
+  if (!rateObjectId) return res.status(400).json({ error: 'rateObjectId is required' });
+
+  try {
+    const transaction = await shippoClient.transactions.create({
+      rate: rateObjectId,
+      labelFileType: 'PDF',
+      async: false
+    });
+
+    if (transaction.status !== 'SUCCESS') {
+      const msgs = transaction.messages ? transaction.messages.map(m => m.text || m).join(', ') : 'Unknown error';
+      return res.status(400).json({ error: `Failed to purchase label: ${msgs}` });
+    }
+
+    const trackingNumber = transaction.trackingNumber;
+    const trackingUrl = transaction.trackingUrlProvider;
+    const labelUrl = transaction.labelUrl;
+
+    await pool.query(
+      `UPDATE orders SET 
+        tracking_number=$1, 
+        tracking_url=$2, 
+        shipping_label_url=$3, 
+        tracking_id=$4,
+        tracking_link=$5,
+        status='shipped' 
+       WHERE id=$6`,
+      [trackingNumber, trackingUrl, labelUrl, trackingNumber, trackingUrl, req.params.id]
+    );
+
+    res.json({ 
+      success: true, 
+      tracking_number: trackingNumber,
+      tracking_url: trackingUrl,
+      label_url: labelUrl
+    });
+  } catch (err) {
+    console.error('Shippo error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 
 // --- Products ---
 router.get('/products', authMiddleware, adminOnly, async (req, res) => {

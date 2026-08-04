@@ -5,6 +5,11 @@ const jwt = require('jsonwebtoken');
 const nodemailer = require('nodemailer');
 const { OAuth2Client } = require('google-auth-library');
 const { transporter, sendOrderEmailToAdmin } = require('../utils/email');
+const twilio = require('twilio');
+
+const twilioClient = process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN 
+  ? twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN)
+  : null;
 
 function generateOTP() {
   return Math.floor(100000 + Math.random() * 900000).toString();
@@ -30,6 +35,31 @@ async function sendOTPEmail(email, otp, name) {
       </div>
     `,
   });
+}
+
+async function sendSMSOTP(phone, otp, name) {
+  if (!twilioClient || !process.env.TWILIO_PHONE_NUMBER) {
+    console.log('Twilio is not configured. Skipping SMS OTP.');
+    return;
+  }
+  
+  if (!phone) return;
+  
+  let formattedPhone = phone.replace(/[^0-9+]/g, '');
+  if (!formattedPhone.startsWith('+')) {
+    formattedPhone = `+91${formattedPhone}`; 
+  }
+
+  try {
+    await twilioClient.messages.create({
+      body: `Hi ${name}, your Houra Jewels OTP is ${otp}. Valid for 10 minutes.`,
+      from: process.env.TWILIO_PHONE_NUMBER,
+      to: formattedPhone
+    });
+    console.log(`SMS OTP sent successfully to ${formattedPhone}`);
+  } catch (error) {
+    console.error(`Failed to send SMS OTP to ${formattedPhone}:`, error);
+  }
 }
 
 // Middleware to verify JWT
@@ -64,7 +94,8 @@ router.post('/signup', async (req, res) => {
     await pool.query('DELETE FROM otps WHERE email=$1', [email]);
     await pool.query('INSERT INTO otps (email, otp, expires_at) VALUES ($1,$2,$3)', [email, otp, expiresAt]);
     await sendOTPEmail(email, otp, name);
-    res.json({ message: 'OTP sent to your email' });
+    await sendSMSOTP(phone, otp, name);
+    res.json({ message: 'OTP sent to your email and phone' });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Server error' });
@@ -313,7 +344,7 @@ router.post('/forgot-password', async (req, res) => {
   const { email } = req.body;
   if (!email) return res.status(400).json({ error: 'Email required' });
   try {
-    const result = await pool.query('SELECT id, name FROM users WHERE email=$1', [email]);
+    const result = await pool.query('SELECT id, name, phone FROM users WHERE email=$1', [email]);
     if (!result.rows[0]) return res.status(404).json({ error: 'No account found with this email' });
     const otp = generateOTP();
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
@@ -333,7 +364,12 @@ router.post('/forgot-password', async (req, res) => {
         </div>
       `,
     });
-    res.json({ success: true, message: 'OTP sent to your email' });
+    
+    if (result.rows[0].phone) {
+      await sendSMSOTP(result.rows[0].phone, otp, result.rows[0].name);
+    }
+    
+    res.json({ success: true, message: 'OTP sent to your email and phone' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
