@@ -322,7 +322,7 @@ router.get('/products', authMiddleware, adminOnly, async (req, res) => {
 });
 
 router.post('/products', authMiddleware, adminOnly, async (req, res) => {
-    const { name, description, stock, sizes, image_url, images, color, category, model, is_active, is_bestseller, is_trending, is_offer, is_festive, product_code, variants, reviews, details } = req.body;
+    const { name, description, stock, sizes, image_url, images, color, category, model, is_active, is_bestseller, is_trending, is_offer, is_festive, product_code, variants, reviews, details, allow_reviews } = req.body;
     
     // Validate sizes/variants
     if ((!sizes || !Array.isArray(sizes) || sizes.length === 0) && (!variants || !Array.isArray(variants) || variants.length === 0)) {
@@ -332,8 +332,8 @@ router.post('/products', authMiddleware, adminOnly, async (req, res) => {
     try {
     const result = await pool.query(
       `INSERT INTO products 
-       (name, description, stock, sizes, image_url, images, color, category, model, is_active, is_bestseller, is_trending, is_offer, is_festive, product_code, variants, reviews, details) 
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18) RETURNING *`,
+       (name, description, stock, sizes, image_url, images, color, category, model, is_active, is_bestseller, is_trending, is_offer, is_festive, product_code, variants, reviews, details, allow_reviews) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19) RETURNING *`,
       [
         name, description, stock, JSON.stringify(sizes || []), image_url, 
         JSON.stringify(images || []), color, category, model, 
@@ -345,7 +345,8 @@ router.post('/products', authMiddleware, adminOnly, async (req, res) => {
         product_code || null,
         JSON.stringify(variants || []),
         JSON.stringify(reviews || []),
-        JSON.stringify(details || [])
+        JSON.stringify(details || []),
+        allow_reviews ?? true
       ]
     );
     res.json({ product: result.rows[0] });
@@ -355,7 +356,7 @@ router.post('/products', authMiddleware, adminOnly, async (req, res) => {
 });
 
 router.put('/products/:id', authMiddleware, adminOnly, async (req, res) => {
-  const { name, description, sizes, stock, image_url, images, color, category, model, is_active, is_bestseller, is_trending, is_offer, is_festive, product_code, variants, reviews, details } = req.body;
+  const { name, description, sizes, stock, image_url, images, color, category, model, is_active, is_bestseller, is_trending, is_offer, is_festive, product_code, variants, reviews, details, allow_reviews } = req.body;
   try {
     const sizesJson = Array.isArray(sizes) ? JSON.stringify(sizes) : '[]';
     const imagesJson = Array.isArray(images) ? JSON.stringify(images) : (image_url ? JSON.stringify([image_url]) : '[]');
@@ -363,8 +364,8 @@ router.put('/products/:id', authMiddleware, adminOnly, async (req, res) => {
     const reviewsJson = Array.isArray(reviews) ? JSON.stringify(reviews) : '[]';
     const detailsJson = Array.isArray(details) ? JSON.stringify(details) : '[]';
     const result = await pool.query(
-      'UPDATE products SET name=$1, description=$2, sizes=$3, stock=$4, image_url=$5, images=$6, color=$7, category=$8, model=$9, is_active=$10, is_bestseller=$11, is_trending=$12, is_offer=$13, is_festive=$14, product_code=$15, variants=$16, reviews=$17, details=$18 WHERE id=$19 RETURNING *',
-      [name, description, sizesJson, stock, image_url, imagesJson, color, category, model || null, is_active, is_bestseller, is_trending, is_offer, is_festive, product_code || null, variantsJson, reviewsJson, detailsJson, req.params.id]
+      'UPDATE products SET name=$1, description=$2, sizes=$3, stock=$4, image_url=$5, images=$6, color=$7, category=$8, model=$9, is_active=$10, is_bestseller=$11, is_trending=$12, is_offer=$13, is_festive=$14, product_code=$15, variants=$16, reviews=$17, details=$18, allow_reviews=$19 WHERE id=$20 RETURNING *',
+      [name, description, sizesJson, stock, image_url, imagesJson, color, category, model || null, is_active, is_bestseller, is_trending, is_offer, is_festive, product_code || null, variantsJson, reviewsJson, detailsJson, allow_reviews ?? true, req.params.id]
     );
     res.json({ product: result.rows[0] });
   } catch (err) {
