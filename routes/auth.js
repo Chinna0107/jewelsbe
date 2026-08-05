@@ -52,7 +52,7 @@ async function sendSMSOTP(phone, otp, name) {
 
   try {
     await twilioClient.messages.create({
-      body: `Hi ${name}, your Houra Jewels OTP is ${otp}. Valid for 10 minutes.`,
+      body: `Your Houra Jewels OTP is ${otp}. Valid for 10 minutes.`,
       from: process.env.TWILIO_PHONE_NUMBER,
       to: formattedPhone
     });
@@ -75,6 +75,7 @@ function authMiddleware(req, res, next) {
 }
 
 // POST /api/auth/signup
+// POST /api/auth/signup — Step 0: save user data, send phone OTP
 router.post('/signup', async (req, res) => {
   const { name, email, phone, password } = req.body;
   if (!name || !email || !phone || !password)
@@ -84,34 +85,60 @@ router.post('/signup', async (req, res) => {
     if (existing.rows.length && existing.rows[0].is_verified)
       return res.status(409).json({ error: 'Email already registered' });
     const hash = await bcrypt.hash(password, 10);
-    const otp = generateOTP();
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
     if (existing.rows.length) {
       await pool.query('UPDATE users SET name=$1, phone=$2, password_hash=$3 WHERE email=$4', [name, phone, hash, email]);
     } else {
       await pool.query('INSERT INTO users (name, email, phone, password_hash) VALUES ($1,$2,$3,$4)', [name, email, phone, hash]);
     }
-    await pool.query('DELETE FROM otps WHERE email=$1', [email]);
-    await pool.query('INSERT INTO otps (email, otp, expires_at) VALUES ($1,$2,$3)', [email, otp, expiresAt]);
-    await sendOTPEmail(email, otp, name);
+    // Send phone OTP
+    const otp = generateOTP();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+    await pool.query('DELETE FROM otps WHERE email=$1 AND type=$2', [email, 'phone']);
+    await pool.query('INSERT INTO otps (email, otp, expires_at, type) VALUES ($1,$2,$3,$4)', [email, otp, expiresAt, 'phone']);
     await sendSMSOTP(phone, otp, name);
-    res.json({ message: 'OTP sent to your email and phone' });
+    res.json({ message: 'Phone OTP sent' });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Server error' });
   }
 });
 
-// POST /api/auth/verify-otp
+// POST /api/auth/verify-phone-otp — Step 1: verify phone OTP, then send email OTP
+router.post('/verify-phone-otp', async (req, res) => {
+  const { email, otp } = req.body;
+  if (!email || !otp) return res.status(400).json({ error: 'Email and OTP required' });
+  try {
+    const result = await pool.query(
+      "SELECT * FROM otps WHERE email=$1 AND otp=$2 AND type='phone' AND expires_at > NOW() ORDER BY created_at DESC LIMIT 1",
+      [email, otp]
+    );
+    if (!result.rows.length) return res.status(400).json({ error: 'Invalid or expired phone OTP' });
+    await pool.query('DELETE FROM otps WHERE email=$1 AND type=$2', [email, 'phone']);
+    // Send email OTP
+    const user = await pool.query('SELECT name FROM users WHERE email=$1', [email]);
+    const name = user.rows[0]?.name || '';
+    const emailOtp = generateOTP();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+    await pool.query('DELETE FROM otps WHERE email=$1 AND type=$2', [email, 'email']);
+    await pool.query('INSERT INTO otps (email, otp, expires_at, type) VALUES ($1,$2,$3,$4)', [email, emailOtp, expiresAt, 'email']);
+    await sendOTPEmail(email, emailOtp, name);
+    res.json({ message: 'Email OTP sent' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/auth/verify-otp — Step 2: verify email OTP, create account
 router.post('/verify-otp', async (req, res) => {
   const { email, otp } = req.body;
   if (!email || !otp) return res.status(400).json({ error: 'Email and OTP required' });
   try {
     const result = await pool.query(
-      'SELECT * FROM otps WHERE email=$1 AND otp=$2 AND expires_at > NOW() ORDER BY created_at DESC LIMIT 1',
+      "SELECT * FROM otps WHERE email=$1 AND otp=$2 AND type='email' AND expires_at > NOW() ORDER BY created_at DESC LIMIT 1",
       [email, otp]
     );
-    if (!result.rows.length) return res.status(400).json({ error: 'Invalid or expired OTP' });
+    if (!result.rows.length) return res.status(400).json({ error: 'Invalid or expired email OTP' });
     await pool.query('UPDATE users SET is_verified=TRUE WHERE email=$1', [email]);
     await pool.query('DELETE FROM otps WHERE email=$1', [email]);
     const user = await pool.query('SELECT id, name, email, phone, role FROM users WHERE email=$1', [email]);
@@ -123,8 +150,6 @@ router.post('/verify-otp', async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 });
-
-// POST /api/auth/login
 router.post('/login', async (req, res) => {
   const { email, password } = req.body;
   if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
