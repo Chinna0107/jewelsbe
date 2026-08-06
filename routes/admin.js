@@ -80,35 +80,98 @@ router.put('/orders/:id/status', authMiddleware, adminOnly, async (req, res) => 
 // POST /api/admin/orders/:id/refund
 const Stripe = require('stripe');
 router.post('/orders/:id/refund', authMiddleware, adminOnly, async (req, res) => {
-  const { refund_breakdown } = req.body;
+  const { refund_breakdown, cancelled_items } = req.body;
+  // cancelled_items: array of { productId, variantSize, qty, price } for partial cancellation
+  // if not provided, full order is cancelled
   try {
     const orderRes = await pool.query('SELECT * FROM orders WHERE id=$1', [req.params.id]);
     const order = orderRes.rows[0];
     if (!order) return res.status(404).json({ error: 'Order not found' });
+    if (order.status === 'cancelled') return res.status(400).json({ error: 'Order is already cancelled' });
 
-    const refundAmount = parseFloat(refund_breakdown?.total) || parseFloat(order.total) || 0;
+    const refundAmount = parseFloat(refund_breakdown?.total) || 0;
+    if (refundAmount <= 0) return res.status(400).json({ error: 'Refund amount must be greater than 0' });
 
-    // Only attempt Stripe refund if paid via Stripe and has a payment intent
+    // Stripe refund
     let refundId = null;
     if (order.stripe_payment_intent_id) {
       const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
       const refund = await stripe.refunds.create({
         payment_intent: order.stripe_payment_intent_id,
-        amount: Math.round(refundAmount * 100), // cents
+        amount: Math.round(refundAmount * 100),
       });
       refundId = refund.id;
     } else {
-      // No payment intent stored — mark as manual refund
       refundId = `MANUAL-${Date.now()}`;
     }
 
-    // Update order: cancelled + store refund info
-    await pool.query(
-      `UPDATE orders SET status='cancelled', refund_id=$1, refund_amount=$2, refund_breakdown=$3 WHERE id=$4`,
-      [refundId, refundAmount, JSON.stringify(refund_breakdown || {}), req.params.id]
-    );
+    const isPartial = cancelled_items && cancelled_items.length > 0;
 
-    res.json({ success: true, refund_id: refundId, amount: refundAmount });
+    if (isPartial) {
+      // Partial cancellation: remove cancelled items from order, keep rest active
+      let currentItems = [];
+      try { currentItems = typeof order.items === 'string' ? JSON.parse(order.items) : (order.items || []); } catch(e) {}
+
+      // Build a set of cancelled item keys
+      const cancelledKeys = new Set(cancelled_items.map(ci => `${ci.productId}__${ci.variantSize || ''}__${ci.qty}`));
+
+      const remainingItems = currentItems.filter(item => {
+        const key = `${item.product?.id}__${item.variant?.size || ''}__${item.qty}`;
+        return !cancelledKeys.has(key);
+      });
+
+      // Restore stock for cancelled items
+      for (const ci of cancelled_items) {
+        if (!ci.productId) continue;
+        const prodRes = await pool.query('SELECT variants FROM products WHERE id=$1', [ci.productId]);
+        let variants = [];
+        try { variants = typeof prodRes.rows[0]?.variants === 'string' ? JSON.parse(prodRes.rows[0].variants) : (prodRes.rows[0]?.variants || []); } catch(e) {}
+        for (let v of variants) {
+          for (let s of (v.sizes || [])) {
+            if (!ci.variantSize || s.size?.toString().trim() === ci.variantSize) {
+              s.stock = parseInt(s.stock || 0) + parseInt(ci.qty || 1);
+            }
+          }
+        }
+        if (variants.length) await pool.query('UPDATE products SET variants=$1 WHERE id=$2', [JSON.stringify(variants), ci.productId]);
+      }
+
+      const newTotal = remainingItems.reduce((sum, item) => sum + (item.variant?.price || item.product?.price || 0) * item.qty, 0);
+      const newStatus = remainingItems.length === 0 ? 'cancelled' : order.status;
+
+      await pool.query(
+        `UPDATE orders SET items=$1, total=$2, status=$3, refund_id=$4, refund_amount=COALESCE(refund_amount,0)+$5, refund_breakdown=$6 WHERE id=$7`,
+        [JSON.stringify(remainingItems), newTotal, newStatus, refundId, refundAmount, JSON.stringify(refund_breakdown || {}), req.params.id]
+      );
+
+      return res.json({ success: true, refund_id: refundId, amount: refundAmount, partial: true, remaining_items: remainingItems.length });
+    } else {
+      // Full cancellation
+      // Restore stock for all items
+      let currentItems = [];
+      try { currentItems = typeof order.items === 'string' ? JSON.parse(order.items) : (order.items || []); } catch(e) {}
+      for (const item of currentItems) {
+        if (!item.product?.id) continue;
+        const prodRes = await pool.query('SELECT variants FROM products WHERE id=$1', [item.product.id]);
+        let variants = [];
+        try { variants = typeof prodRes.rows[0]?.variants === 'string' ? JSON.parse(prodRes.rows[0].variants) : (prodRes.rows[0]?.variants || []); } catch(e) {}
+        for (let v of variants) {
+          for (let s of (v.sizes || [])) {
+            if (!item.variant?.size || s.size?.toString().trim() === item.variant.size) {
+              s.stock = parseInt(s.stock || 0) + parseInt(item.qty || 1);
+            }
+          }
+        }
+        if (variants.length) await pool.query('UPDATE products SET variants=$1 WHERE id=$2', [JSON.stringify(variants), item.product.id]);
+      }
+
+      await pool.query(
+        `UPDATE orders SET status='cancelled', refund_id=$1, refund_amount=$2, refund_breakdown=$3 WHERE id=$4`,
+        [refundId, refundAmount, JSON.stringify(refund_breakdown || {}), req.params.id]
+      );
+
+      return res.json({ success: true, refund_id: refundId, amount: refundAmount, partial: false });
+    }
   } catch (err) {
     console.error('Refund error:', err);
     res.status(500).json({ error: err.message });
@@ -126,7 +189,15 @@ router.post('/orders/:id/ship', authMiddleware, adminOnly, async (req, res) => {
 
     let items = [];
     try { items = typeof order.items === 'string' ? JSON.parse(order.items) : (order.items || []); } catch(e) {}
-    
+
+    // Calculate total weight from item sizes, fallback to 16oz
+    let totalWeightOz = 0;
+    for (const item of items) {
+      const w = parseFloat(item.variant?.weight || item.size?.weight || 0);
+      totalWeightOz += (w > 0 ? w : 16) * (item.qty || 1);
+    }
+    if (totalWeightOz === 0) totalWeightOz = 16;
+
     let address = {};
     try { address = typeof order.address === 'string' ? JSON.parse(order.address) : (order.address || {}); } catch(e) {}
 
@@ -136,6 +207,11 @@ router.post('/orders/:id/ship', authMiddleware, adminOnly, async (req, res) => {
       units: item.qty || 1,
       selling_price: item.variant?.price || item.product?.price || 0,
     }));
+
+    const totalWeight = items.reduce((sum, item) => {
+      const w = parseFloat(item.variant?.weight || item.size?.weight || 0);
+      return sum + (w > 0 ? w : 0.5) * (item.qty || 1);
+    }, 0) || 0.5;
 
     const shiprocketPayload = {
       order_id: order.order_number || order.id.toString(),
@@ -156,7 +232,7 @@ router.post('/orders/:id/ship', authMiddleware, adminOnly, async (req, res) => {
       length: 10,
       breadth: 10,
       height: 10,
-      weight: 0.5
+      weight: totalWeight
     };
 
     // 1. Create Custom Order in Shiprocket
@@ -220,7 +296,7 @@ router.post('/orders/:id/shippo-rates', authMiddleware, adminOnly, async (req, r
       width: '5',
       height: '5',
       distanceUnit: 'in',
-      weight: '16',
+      weight: totalWeightOz.toString(),
       massUnit: 'oz',
     };
 
@@ -322,9 +398,8 @@ router.get('/products', authMiddleware, adminOnly, async (req, res) => {
 });
 
 router.post('/products', authMiddleware, adminOnly, async (req, res) => {
-    const { name, description, stock, sizes, image_url, images, color, category, model, is_active, is_bestseller, is_trending, is_offer, is_festive, product_code, variants, reviews, details, allow_reviews } = req.body;
+    const { name, description, stock, sizes, image_url, images, color, category, model, is_active, is_bestseller, is_trending, is_offer, is_festive, variants, reviews, details, allow_reviews } = req.body;
     
-    // Validate sizes/variants
     if ((!sizes || !Array.isArray(sizes) || sizes.length === 0) && (!variants || !Array.isArray(variants) || variants.length === 0)) {
       return res.status(400).json({ error: 'At least one size or variant with price is required.' });
     }
@@ -332,8 +407,8 @@ router.post('/products', authMiddleware, adminOnly, async (req, res) => {
     try {
     const result = await pool.query(
       `INSERT INTO products 
-       (name, description, stock, sizes, image_url, images, color, category, model, is_active, is_bestseller, is_trending, is_offer, is_festive, product_code, variants, reviews, details, allow_reviews) 
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19) RETURNING *`,
+       (name, description, stock, sizes, image_url, images, color, category, model, is_active, is_bestseller, is_trending, is_offer, is_festive, variants, reviews, details, allow_reviews) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18) RETURNING *`,
       [
         name, description, stock, JSON.stringify(sizes || []), image_url, 
         JSON.stringify(images || []), color, category, model, 
@@ -342,7 +417,6 @@ router.post('/products', authMiddleware, adminOnly, async (req, res) => {
         is_trending ?? false,
         is_offer ?? false,
         is_festive ?? false,
-        product_code || null,
         JSON.stringify(variants || []),
         JSON.stringify(reviews || []),
         JSON.stringify(details || []),
@@ -356,7 +430,7 @@ router.post('/products', authMiddleware, adminOnly, async (req, res) => {
 });
 
 router.put('/products/:id', authMiddleware, adminOnly, async (req, res) => {
-  const { name, description, sizes, stock, image_url, images, color, category, model, is_active, is_bestseller, is_trending, is_offer, is_festive, product_code, variants, reviews, details, allow_reviews } = req.body;
+  const { name, description, sizes, stock, image_url, images, color, category, model, is_active, is_bestseller, is_trending, is_offer, is_festive, variants, reviews, details, allow_reviews } = req.body;
   try {
     const sizesJson = Array.isArray(sizes) ? JSON.stringify(sizes) : '[]';
     const imagesJson = Array.isArray(images) ? JSON.stringify(images) : (image_url ? JSON.stringify([image_url]) : '[]');
@@ -364,8 +438,8 @@ router.put('/products/:id', authMiddleware, adminOnly, async (req, res) => {
     const reviewsJson = Array.isArray(reviews) ? JSON.stringify(reviews) : '[]';
     const detailsJson = Array.isArray(details) ? JSON.stringify(details) : '[]';
     const result = await pool.query(
-      'UPDATE products SET name=$1, description=$2, sizes=$3, stock=$4, image_url=$5, images=$6, color=$7, category=$8, model=$9, is_active=$10, is_bestseller=$11, is_trending=$12, is_offer=$13, is_festive=$14, product_code=$15, variants=$16, reviews=$17, details=$18, allow_reviews=$19 WHERE id=$20 RETURNING *',
-      [name, description, sizesJson, stock, image_url, imagesJson, color, category, model || null, is_active, is_bestseller, is_trending, is_offer, is_festive, product_code || null, variantsJson, reviewsJson, detailsJson, allow_reviews ?? true, req.params.id]
+      'UPDATE products SET name=$1, description=$2, sizes=$3, stock=$4, image_url=$5, images=$6, color=$7, category=$8, model=$9, is_active=$10, is_bestseller=$11, is_trending=$12, is_offer=$13, is_festive=$14, variants=$15, reviews=$16, details=$17, allow_reviews=$18 WHERE id=$19 RETURNING *',
+      [name, description, sizesJson, stock, image_url, imagesJson, color, category, model || null, is_active, is_bestseller, is_trending, is_offer, is_festive, variantsJson, reviewsJson, detailsJson, allow_reviews ?? true, req.params.id]
     );
     res.json({ product: result.rows[0] });
   } catch (err) {
@@ -759,6 +833,31 @@ router.post('/settings/tax', authMiddleware, adminOnly, async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/admin/settings/vacation
+router.get('/settings/vacation', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT value FROM settings WHERE key=$1', ['vacation']);
+    res.json(result.rows[0]?.value || { is_active: false, message: '' });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/admin/settings/vacation
+router.post('/settings/vacation', authMiddleware, adminOnly, async (req, res) => {
+  const { is_active, message } = req.body;
+  try {
+    const value = JSON.stringify({ is_active: !!is_active, message: message || '' });
+    await pool.query(
+      `INSERT INTO settings (key, value) VALUES ('vacation', $1) ON CONFLICT (key) DO UPDATE SET value=$1, updated_at=NOW()`,
+      [value]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
   }
 });
 

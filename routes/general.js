@@ -270,6 +270,55 @@ router.get('/shipping', async (req, res) => {
   }
 });
 
+// GET /api/general/order/:orderNumber
+router.get('/order/:orderNumber', async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT id, order_number, status, order_type, created_at, total, items FROM orders WHERE order_number=$1',
+      [req.params.orderNumber]
+    );
+    if (!result.rows.length) return res.status(404).json({ error: 'Order not found' });
+    const order = result.rows[0];
+    if (typeof order.items === 'string') {
+      try { order.items = JSON.parse(order.items); } catch(e) { order.items = []; }
+    }
+    res.json({ order });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/general/validate-address
+router.post('/validate-address', async (req, res) => {
+  const { name, street1, street2, city, state, zip, country, phone } = req.body;
+  if (!street1 || !city || !zip || !country)
+    return res.status(400).json({ valid: false, message: 'Missing required address fields' });
+  try {
+    const { Shippo } = require('shippo');
+    const shippo = process.env.SHIPPO_API_KEY ? new Shippo({ apiKeyHeader: process.env.SHIPPO_API_KEY }) : null;
+    if (!shippo) return res.json({ valid: true, message: 'Address validation skipped (Shippo not configured)' });
+    const result = await shippo.addresses.create({
+      name: name || 'Customer',
+      street1,
+      street2: street2 || '',
+      city,
+      state: state || '',
+      zip,
+      country,
+      phone: phone || '',
+      validate: true
+    });
+    const isValid = result.validationResults?.isValid !== false;
+    const messages = result.validationResults?.messages || [];
+    const errMsg = messages.find(m => m.type === 'error' || m.type === 'warning')?.text || '';
+    res.json({ valid: isValid, message: isValid ? 'Address validated' : (errMsg || 'Address could not be validated') });
+  } catch (err) {
+    console.error('Address validation error:', err.message);
+    // Don't block checkout on validation errors
+    res.json({ valid: true, message: 'Address validation skipped' });
+  }
+});
+
 // GET /api/general/reviews
 router.get('/reviews', async (req, res) => {
   try {
@@ -279,6 +328,16 @@ router.get('/reviews', async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 });
+// GET /api/general/settings/vacation
+router.get('/settings/vacation', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT value FROM settings WHERE key=$1', ['vacation']);
+    res.json(result.rows[0]?.value || { is_active: false, message: '' });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // GET /api/general/settings/announcement
 router.get('/settings/announcement', async (req, res) => {
   try {

@@ -84,6 +84,9 @@ router.post('/signup', async (req, res) => {
     const existing = await pool.query('SELECT id, is_verified FROM users WHERE email=$1', [email]);
     if (existing.rows.length && existing.rows[0].is_verified)
       return res.status(409).json({ error: 'Email already registered' });
+    const phoneExists = await pool.query('SELECT id FROM users WHERE phone=$1 AND is_verified=true AND email!=$2', [phone, email]);
+    if (phoneExists.rows.length)
+      return res.status(409).json({ error: 'Phone number already registered' });
     const hash = await bcrypt.hash(password, 10);
     if (existing.rows.length) {
       await pool.query('UPDATE users SET name=$1, phone=$2, password_hash=$3 WHERE email=$4', [name, phone, hash, email]);
@@ -218,6 +221,14 @@ router.get('/profile', authMiddleware, async (req, res) => {
 router.put('/profile', authMiddleware, async (req, res) => {
   const { name, phone } = req.body;
   try {
+    if (phone) {
+      const phoneExists = await pool.query(
+        'SELECT id FROM users WHERE phone=$1 AND is_verified=true AND id!=$2',
+        [phone, req.user.id]
+      );
+      if (phoneExists.rows.length)
+        return res.status(409).json({ error: 'Phone number already registered to another account' });
+    }
     const result = await pool.query(
       'UPDATE users SET name=$1, phone=$2 WHERE id=$3 RETURNING id, name, email, phone',
       [name, phone, req.user.id]
@@ -239,6 +250,24 @@ router.post('/address', authMiddleware, async (req, res) => {
       'INSERT INTO addresses (user_id, name, line1, line2, city, state, pincode, country, mobile, is_default) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *',
       [req.user.id, name, line1, line2 || null, city, state, pincode, country || null, mobile, is_default || false]
     );
+    res.json({ address: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// PUT /api/auth/address/:id
+router.put('/address/:id', authMiddleware, async (req, res) => {
+  const { name, line1, line2, city, state, pincode, country, mobile, is_default } = req.body;
+  try {
+    if (is_default) {
+      await pool.query('UPDATE addresses SET is_default=FALSE WHERE user_id=$1', [req.user.id]);
+    }
+    const result = await pool.query(
+      'UPDATE addresses SET name=$1, line1=$2, line2=$3, city=$4, state=$5, pincode=$6, country=$7, mobile=$8, is_default=$9 WHERE id=$10 AND user_id=$11 RETURNING *',
+      [name, line1, line2 || null, city, state, pincode, country || null, mobile, is_default || false, req.params.id, req.user.id]
+    );
+    if (!result.rows.length) return res.status(404).json({ error: 'Address not found' });
     res.json({ address: result.rows[0] });
   } catch (err) {
     res.status(500).json({ error: 'Server error' });

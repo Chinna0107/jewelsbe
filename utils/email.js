@@ -17,7 +17,7 @@ async function sendOrderEmailToAdmin(orderNumber, total, address, items) {
     ).join('');
     await transporter.sendMail({
       from: `"Houra Jewels" <${process.env.EMAIL_USER}>`,
-      to: 'kancharlahemanth89@gmail.com',
+      to: 'support@hourajewels.com',
       subject: `New Order Received - ${orderNumber}`,
       html: `
         <div style="font-family:Arial,sans-serif;max-width:560px;margin:auto;padding:24px;border:1px solid #f0e0c0;border-radius:12px">
